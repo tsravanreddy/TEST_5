@@ -1,0 +1,159 @@
+name: Configure config.json from Issue
+on:
+  issues:
+    types: [opened, edited]
+permissions:
+  contents: write
+  issues: write
+jobs:
+  update-config:
+    if: github.event.issue.title == 'Configure config.json'
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract values from issue body
+        id: extract
+        shell: pwsh
+        run: |
+          $body = "${{ github.event.issue.body }}"
+          $driver_name = ($body -split "### Driver Name")[1] -split "###" | Select-Object -First 1
+          $driver_name = $driver_name.Trim()
+          $version = ($body -split "### Version")[1] -split "###" | Select-Object -First 1
+          $version = $version.Trim()
+          $instrument_model = ($body -split "### Instrument Model")[1] -split "###" | Select-Object -First 1
+          $instrument_model = $instrument_model.Trim()
+          $manufacturer = ($body -split "### Manufacturer")[1] -split "###" | Select-Object -First 1
+          $manufacturer = $manufacturer.Trim()
+          "driver_name=$driver_name" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "instrument_model=$instrument_model" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "manufacturer=$manufacturer" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Debug extracted values
+        shell: pwsh
+        run: |
+          Write-Host "Driver Name: ${{ steps.extract.outputs.driver_name }}"
+          Write-Host "Version: ${{ steps.extract.outputs.version }}"
+          Write-Host "Instrument Model: ${{ steps.extract.outputs.instrument_model }}"
+          Write-Host "Manufacturer: ${{ steps.extract.outputs.manufacturer }}"
+
+      - name: Update config.json
+        shell: pwsh
+        run: |
+          $configPath = "config.json"
+          $config = Get-Content $configPath | ConvertFrom-Json
+          $config.driver_name = "${{ steps.extract.outputs.driver_name }}"
+          $config.version = "${{ steps.extract.outputs.version }}"
+          $config.instrument_model = "${{ steps.extract.outputs.instrument_model }}"
+          $config.manufacturer = "${{ steps.extract.outputs.manufacturer }}"
+          $config | ConvertTo-Json -Depth 10 | Set-Content $configPath
+
+      - name: Rename ConsoleApp1 folder and files
+        shell: pwsh
+        run: |
+          $driverName = "${{ steps.extract.outputs.driver_name }}"
+          $sanitizedDriverName = $driverName -replace '[^a-zA-Z0-9_]', '_'
+          
+          Write-Host "Renaming ConsoleApp1 folder and files to: $sanitizedDriverName"
+          
+          # Check if ConsoleApp1 folder exists
+          if (Test-Path "ConsoleApp1") {
+            Write-Host "Found ConsoleApp1 folder, proceeding with rename..."
+            
+            # Rename .sln file if it exists
+            if (Test-Path "ConsoleApp1/ConsoleApp1.sln") {
+              Write-Host "Renaming ConsoleApp1.sln to $sanitizedDriverName.sln"
+              Rename-Item "ConsoleApp1/ConsoleApp1.sln" "$sanitizedDriverName.sln"
+              
+              # Update content of .sln file to reference new project name
+              $slnContent = Get-Content "ConsoleApp1/$sanitizedDriverName.sln" -Raw
+              $slnContent = $slnContent -replace "ConsoleApp1", $sanitizedDriverName
+              Set-Content "ConsoleApp1/$sanitizedDriverName.sln" $slnContent
+            }
+            
+            # Rename .csproj file if it exists
+            if (Test-Path "ConsoleApp1/ConsoleApp1.csproj") {
+              Write-Host "Renaming ConsoleApp1.csproj to $sanitizedDriverName.csproj"
+              Rename-Item "ConsoleApp1/ConsoleApp1.csproj" "$sanitizedDriverName.csproj"
+            }
+            
+            # Update any other files that might reference ConsoleApp1
+            $filesToUpdate = Get-ChildItem "ConsoleApp1" -Recurse -File | Where-Object { $_.Extension -match '\.(cs|csproj|sln|json|xml)$' }
+            foreach ($file in $filesToUpdate) {
+              try {
+                $content = Get-Content $file.FullName -Raw -ErrorAction SilentlyContinue
+                if ($content -and $content.Contains("ConsoleApp1")) {
+                  Write-Host "Updating references in: $($file.Name)"
+                  $content = $content -replace "ConsoleApp1", $sanitizedDriverName
+                  Set-Content $file.FullName $content
+                }
+              }
+              catch {
+                Write-Host "Warning: Could not update file $($file.FullName): $($_.Exception.Message)"
+              }
+            }
+            
+            # Finally, rename the folder itself
+            Write-Host "Renaming ConsoleApp1 folder to $sanitizedDriverName"
+            Rename-Item "ConsoleApp1" $sanitizedDriverName
+            
+            Write-Host "Folder and files renamed successfully!"
+          } else {
+            Write-Host "ConsoleApp1 folder not found, skipping rename operation"
+          }
+
+      - name: Clean up workflow and issue template files
+        shell: pwsh
+        run: |
+          Write-Host "Removing workflow and issue template files..."
+          
+          # Remove the workflow file
+          if (Test-Path ".github/workflows/configure-config-json.yml") {
+            Remove-Item -Path ".github/workflows/configure-config-json.yml" -Force
+            Write-Host "Removed: .github/workflows/configure-config-json.yml"
+          }
+          
+          # Remove issue template files (handle both .yml and .ym extensions)
+          if (Test-Path ".github/ISSUE_TEMPLATE/configure-config-json.yml") {
+            Remove-Item -Path ".github/ISSUE_TEMPLATE/configure-config-json.yml" -Force
+            Write-Host "Removed: .github/ISSUE_TEMPLATE/configure-config-json.yml"
+          }
+          
+          if (Test-Path ".github/ISSUE_TEMPLATE/configure-config-json.ym") {
+            Remove-Item -Path ".github/ISSUE_TEMPLATE/configure-config-json.ym" -Force
+            Write-Host "Removed: .github/ISSUE_TEMPLATE/configure-config-json.ym"
+          }
+          
+          Write-Host "Cleanup completed"
+
+      - name: Commit and push changes
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Configure config.json, rename project files, and cleanup workflow and issue template"
+          file_pattern: |
+            config.json
+            .github/workflows/configure-config-json.yml
+            .github/ISSUE_TEMPLATE/configure-config-json.yml
+            .github/ISSUE_TEMPLATE/configure-config-json.ym
+            ConsoleApp1/**
+            ${{ steps.extract.outputs.driver_name }}/**
+
+      - name: Add comment and close issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue_number = context.payload.issue.number;
+            const driverName = "${{ steps.extract.outputs.driver_name }}";
+            const sanitizedDriverName = driverName.replace(/[^a-zA-Z0-9_]/g, '_');
+            
+            await github.rest.issues.createComment({
+              updated  `
+            });
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue_number,
+              state: 'closed'
+            });
